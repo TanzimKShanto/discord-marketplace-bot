@@ -59,6 +59,41 @@ client.on('messageCreate', async (msg) => {
     await db.update(users).set({ balance: user.balance + amount }).where(eq(users.discordId, mentioned.id));
     msg.reply(`Added 💰 ${amount} to ${mentioned.username}`);
   }
+  else if (command === 'removemoney') {
+    if (!msg.member?.permissions.has('Administrator')) {
+      return msg.reply('❌ Only admins can do this.');
+    }
+
+    const mentioned = msg.mentions.users.first();
+    const amount = parseInt(args[1] ?? '0');
+
+    if (!mentioned || isNaN(amount) || amount <= 0) {
+      return msg.reply('❌ Usage: `!removemoney @user amount`');
+    }
+
+    const user = await db
+      .select()
+      .from(users)
+      .where(eq(users.discordId, mentioned.id))
+      .then((r) => r[0]);
+
+    if (!user) {
+      return msg.reply('❌ User not registered.');
+    }
+
+    const currentBalance = user.balance ?? 0;
+
+    if (currentBalance < amount) {
+      return msg.reply(`❌ ${mentioned.username} doesn't have enough money. Current balance: 💰 ${currentBalance}`);
+    }
+
+    await db
+      .update(users)
+      .set({ balance: currentBalance - amount })
+      .where(eq(users.discordId, mentioned.id));
+
+    msg.reply(`✅ Removed 💰 ${amount} from ${mentioned.username}`);
+  }
   else if (command === 'additem') {
     if (!msg.member?.permissions.has('Administrator')) return msg.reply('Only admins can add items.');
 
