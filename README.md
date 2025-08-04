@@ -6,9 +6,15 @@ A simple Discord bot with a user marketplace system — built with [discord.js](
 ## 🚀 Features
 
 - User registration
+![register](images/register.png)
 - Wallet system (balance, add/remove money)
+![balance](images/balance.png)
+![addmoney](images/addmoney.png)
 - Peer-to-peer money transfer
+![transfer](images/transfer.png)
 - Item marketplace (buy/sell)
+![buy](images/buy.png)
+![sell](images/sell.png)
 - Admin-only commands
 
 ---
@@ -105,7 +111,6 @@ npm run dev
 !additem item_name price   → List an item for sale
 !shop                      → View items for sale
 !inventory                 → View your inventory
-
 ```
 
 ## 👨‍💻 Author
