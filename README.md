@@ -102,7 +102,9 @@ npm run dev
 !addmoney @user 100        → Admin: add money to a user
 !send @user 50             → Send money to another user
 !buy item_name             → Buy an item from marketplace
-!sell item_name price      → List an item for sale
+!additem item_name price   → List an item for sale
+!shop                      → View items for sale
+!inventory                 → View your inventory
 
 ```
 
