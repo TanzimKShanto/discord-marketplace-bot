@@ -10,7 +10,7 @@ A simple Discord bot with a user marketplace system — built with [discord.js](
 
 - **Wallet system (balance, add/remove money)**  
   ![balance](images/balance.png)  
-  ![addmoney](images/addmoney.png)
+  ![addmoney](images/addmoney.png)  
   ![removemoney](images/removemoney.png)
 
 - **Peer-to-peer money transfer**  
