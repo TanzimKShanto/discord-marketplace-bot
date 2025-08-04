@@ -104,6 +104,8 @@ npm run dev
 !buy item_name             → Buy an item from marketplace
 !sell item_name price      → List an item for sale
 
+```
+
 ## 👨‍💻 Author
 
 [Tanzim K Shanto](https://github.com/TanzimKShanto)
