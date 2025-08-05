@@ -1,9 +1,9 @@
 import 'dotenv/config';
 
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { db } from './db/index.js';
 import { users, items, userItems } from './db/schema.js';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 const client = new Client({
   intents: [
@@ -14,7 +14,16 @@ const client = new Client({
     GatewayIntentBits.DirectMessages
   ]
 })
-
+type UserRow = {
+  id: number;
+  balance: number;
+  discord_id: string;
+}
+type ItemRow = {
+  id: number;
+  name: string;
+  price: number;
+}
 
 client.on('ready', () => {
   console.log(`Logged in as ${client.user?.tag}!`);
@@ -28,165 +37,233 @@ client.on('messageCreate', async (msg) => {
 
   const discordId = msg.author.id;
 
-  if (command === 'register') {
-    const existing = await db.select().from(users).where(eq(users.discordId, discordId));
-    if (existing.length) {
-      return msg.reply('You are already registered!');
+  switch (command) {
+    case "register": {
+      const existing = await db.select().from(users).where(eq(users.discordId, discordId));
+      if (existing.length) return msg.reply("You are already registered!");
+
+      await db.insert(users).values({ discordId, balance: 1000 });
+      msg.reply("Registered with 1000 coins!");
+      break;
     }
 
-    await db.insert(users).values({ discordId, balance: 1000 });
-    msg.reply('Registered with 1000 coins!');
-  }
+    case "balance": {
+      const user = await db.select().from(users).where(eq(users.discordId, discordId)).then(r => r[0]);
+      if (!user) return msg.reply("You are not registered.");
 
-  else if (command === 'balance') {
-    const user = await db.select().from(users).where(eq(users.discordId, discordId)).then(r => r[0]);
-    if (!user) return msg.reply('You are not registered.');
-
-    msg.reply(`Your balance is 💰 ${user.balance}`);
-  }
-
-  else if (command === 'addmoney') {
-    if (!msg.member?.permissions.has('Administrator')) return msg.reply('Only admins can do this.');
-
-    const mentioned = msg.mentions.users.first();
-    const amount = parseInt(args[1] ?? '0');
-
-    if (!mentioned || isNaN(amount)) return msg.reply('Usage: !addmoney @user amount');
-
-    const user = await db.select().from(users).where(eq(users.discordId, mentioned.id)).then(r => r[0]);
-    if (!user) return msg.reply('User not registered.');
-
-    await db.update(users).set({ balance: user.balance + amount }).where(eq(users.discordId, mentioned.id));
-    msg.reply(`Added 💰 ${amount} to ${mentioned.username}`);
-  }
-  else if (command === 'removemoney') {
-    if (!msg.member?.permissions.has('Administrator')) {
-      return msg.reply('❌ Only admins can do this.');
+      msg.reply(`Your balance is 💰 ${user.balance}`);
+      break;
     }
 
-    const mentioned = msg.mentions.users.first();
-    const amount = parseInt(args[1] ?? '0');
+    case "addmoney": {
+      if (!msg.member?.permissions.has(PermissionsBitField.Flags.Administrator)) return msg.reply("Only admins can do this.");
 
-    if (!mentioned || isNaN(amount) || amount <= 0) {
-      return msg.reply('❌ Usage: `!removemoney @user amount`');
+      const mentioned = msg.mentions.users.first();
+      const amount = parseInt(args[1] ?? "0");
+
+      if (!mentioned || isNaN(amount)) return msg.reply("Usage: !addmoney @user amount");
+
+      await db.transaction(async (tx) => {
+        const user = await tx.select()
+          .from(users)
+          .where(eq(users.discordId, mentioned.id))
+          .for('update') // <-- Row-level locking 
+          .then(r => r[0]);
+
+        if (!user) {
+          return msg.reply('User not registered.');
+        }
+
+        const newBalance = user.balance + amount;
+
+        await tx.update(users)
+          .set({ balance: newBalance })
+          .where(eq(users.discordId, mentioned.id));
+
+        await msg.reply(`Added 💰 ${amount} to ${mentioned.username}`);
+      });
+      break;
     }
 
-    const user = await db
-      .select()
-      .from(users)
-      .where(eq(users.discordId, mentioned.id))
-      .then((r) => r[0]);
+    case "removemoney": {
+      if (!msg.member?.permissions.has(PermissionsBitField.Flags.Administrator)) return msg.reply("Only admins can do this.");
 
-    if (!user) {
-      return msg.reply('❌ User not registered.');
+      const mentioned = msg.mentions.users.first();
+      const amount = parseInt(args[1] ?? "0");
+
+      if (!mentioned || isNaN(amount) || amount <= 0) return msg.reply("Usage: !removemoney @user amount");
+
+      await db.transaction(async (tx) => {
+        // Lock the user row for update
+        const user = await tx
+          .select()
+          .from(users)
+          .where(eq(users.discordId, mentioned.id))
+          .for('update') // This is the row-level lock
+          .then(r => r[0]);
+
+        if (!user) {
+          return msg.reply("User not registered.");
+        }
+
+        if (user.balance < amount) {
+          return msg.reply(`${mentioned.username} doesn't have enough money. Current balance: 💰 ${user.balance}`);
+        }
+
+        const newBalance = user.balance - amount;
+
+        await tx
+          .update(users)
+          .set({ balance: newBalance })
+          .where(eq(users.discordId, mentioned.id));
+
+        msg.reply(`Removed 💰 ${amount} from ${mentioned.username}`);
+      });
+      break;
     }
 
-    const currentBalance = user.balance ?? 0;
+    case "additem": {
+      if (!msg.member?.permissions.has(PermissionsBitField.Flags.Administrator)) return msg.reply("Only admins can add items.");
 
-    if (currentBalance < amount) {
-      return msg.reply(`❌ ${mentioned.username} doesn't have enough money. Current balance: 💰 ${currentBalance}`);
+      const [name, priceStr] = args;
+      const price = parseInt(priceStr ?? "0");
+
+      if (!name || isNaN(price)) return msg.reply("Usage: !additem <name> <price>");
+
+      const existing = await db.select().from(items).where(eq(items.name, name.toLowerCase()));
+      if (existing.length > 0) return msg.reply("Item already exists.");
+
+      await db.insert(items).values({ name: name.toLowerCase(), price });
+      msg.reply(`✅ Added item **${name}** with price 💰 ${price}`);
+      break;
     }
 
-    await db
-      .update(users)
-      .set({ balance: currentBalance - amount })
-      .where(eq(users.discordId, mentioned.id));
+    case "send": {
+      const mentioned = msg.mentions.users.first();
+      const amount = parseInt(args[1] ?? "0");
 
-    msg.reply(`✅ Removed 💰 ${amount} from ${mentioned.username}`);
-  }
-  else if (command === 'additem') {
-    if (!msg.member?.permissions.has('Administrator')) return msg.reply('Only admins can add items.');
+      if (!mentioned || isNaN(amount)) return msg.reply("Usage: !send @user amount");
 
-    const [name, priceStr] = args;
-    const price = parseInt(priceStr ?? '0');
+      await db.transaction(async (tx) => {
+        // Lock sender and receiver rows
+        const senderResult = await tx.execute(
+          sql`SELECT * FROM users WHERE discord_id = ${discordId} FOR UPDATE`
+        );
+        const receiverResult = await tx.execute(
+          sql`SELECT * FROM users WHERE discord_id = ${mentioned.id} FOR UPDATE`
+        );
 
-    if (!name || isNaN(price)) return msg.reply('Usage: !additem <name> <price>');
+        const sender = senderResult.rows[0] as UserRow;
+        const receiver = receiverResult.rows[0] as UserRow;
 
-    const existing = await db.select().from(items).where(eq(items.name, name.toLowerCase()));
-    if (existing.length > 0) return msg.reply('Item already exists.');
+        if (!sender || !receiver) {
+          return msg.reply('Both users must be registered.');
+        }
 
-    await db.insert(items).values({ name: name.toLowerCase(), price });
-    msg.reply(`✅ Added item **${name}** with price 💰 ${price}`);
-  }
+        if (sender.balance < amount) {
+          return msg.reply('Insufficient balance.');
+        }
 
-  else if (command === 'send') {
-    const mentioned = msg.mentions.users.first();
-    const amount = parseInt(args[1] ?? '0');
+        // Now safely update balances
+        await tx.execute(
+          sql`UPDATE users SET balance = ${sender.balance - amount} WHERE discord_id = ${sender.discord_id}`
+        );
 
-    if (!mentioned || isNaN(amount)) return msg.reply('Usage: !send @user amount');
+        await tx.execute(
+          sql`UPDATE users SET balance = ${receiver.balance + amount} WHERE discord_id = ${receiver.discord_id}`
+        );
 
-    const sender = await db.select().from(users).where(eq(users.discordId, discordId)).then(r => r[0]);
-    const receiver = await db.select().from(users).where(eq(users.discordId, mentioned.id)).then(r => r[0]);
+        msg.reply(`Sent 💰 ${amount} to ${mentioned.username}`);
+      });
+      break;
+    }
+    // TODO: rewrite the buy with sql
+    case "buy": {
+      const itemName = args[0]?.toLowerCase();
+      if (!itemName) return msg.reply("Usage: !buy itemname");
 
-    if (!sender || !receiver) return msg.reply('Both users must be registered.');
-    if (sender.balance < amount) return msg.reply('Insufficient balance.');
+      try {
+        await db.transaction(async (tx) => {
+          // Lock the user row FOR UPDATE
+          const senderResult = await tx.execute(sql`
+        SELECT * FROM users WHERE discord_id = ${discordId} FOR UPDATE
+      `);
+          const user = senderResult.rows[0] as UserRow;
+          if (!user) throw new Error("You are not registered.");
 
-    await db.transaction(async (tx) => {
-      await tx.update(users).set({ balance: sender.balance - amount }).where(eq(users.discordId, sender.discordId));
-      await tx.update(users).set({ balance: receiver.balance + amount }).where(eq(users.discordId, receiver.discordId));
-    });
+          // Get the item
+          const itemResult = await tx.execute(sql`
+        SELECT * FROM items WHERE name = ${itemName}
+      `);
+          const item = itemResult.rows[0] as ItemRow;
+          if (!item) throw new Error("Item not found.");
 
-    msg.reply(`Sent 💰 ${amount} to ${mentioned.username}`);
-  }
+          if (user.balance < item.price) throw new Error("Not enough money.");
 
-  else if (command === 'buy') {
-    const itemName = args[0]?.toLowerCase();
-    if (!itemName) return msg.reply('Usage: !buy itemname');
+          // Deduct balance
+          await tx.execute(sql`
+        UPDATE users SET balance = balance - ${item.price} WHERE discord_id = ${discordId}
+      `);
 
-    const user = await db.select().from(users).where(eq(users.discordId, discordId)).then(r => r[0]);
-    if (!user) return msg.reply('You are not registered.');
+          // Check ownership and update or insert
+          const ownedResult = await tx.execute(sql`
+        SELECT * FROM user_items
+        WHERE user_id = ${user.id} AND item_id = ${item.id} FOR UPDATE
+      `);
+          const owned = ownedResult.rows[0];
 
-    const item = await db.select().from(items).where(eq(items.name, itemName)).then(r => r[0]);
-    if (!item) return msg.reply('Item not found.');
-    if (user.balance < item.price) return msg.reply('Not enough money.');
+          if (owned) {
+            await tx.execute(sql`
+          UPDATE user_items
+          SET quantity = quantity + 1
+          WHERE id = ${owned.id}
+        `);
+          } else {
+            await tx.execute(sql`
+          INSERT INTO user_items (user_id, item_id, quantity)
+          VALUES (${user.id}, ${item.id}, 1)
+        `);
+          }
 
-    await db.transaction(async (tx) => {
-      await tx.update(users).set({ balance: user.balance - item.price }).where(eq(users.discordId, user.discordId));
-
-      const owned = await tx.select().from(userItems)
-        .where(eq(userItems.userId, user.id))
-        .then(rows => rows.find(r => r.itemId === item.id));
-
-      if (owned) {
-        await tx.update(userItems)
-          .set({ quantity: owned.quantity + 1 })
-          .where(eq(userItems.id, owned.id));
-      } else {
-        await tx.insert(userItems).values({ userId: user.id, itemId: item.id, quantity: 1 });
+          msg.reply(`You bought **${item.name}** for 💰 ${item.price}`);
+        });
+      } catch (err) {
+        console.error("Transaction failed:", err);
+        msg.reply((err as Error).message || "Something went wrong while buying.");
       }
-    });
+      break;
+    }
+    case "shop": {
+      const allItems = await db.select().from(items);
+      if (allItems.length === 0) return msg.reply("No items available in the shop.");
 
-    msg.reply(`You bought **${item.name}** for 💰 ${item.price}`);
+      const shopList = allItems.map(i => `🛒 **${i.name}** - 💰 ${i.price}`).join("\n");
+      msg.reply(`**Marketplace Items:**\n${shopList}`);
+      break;
+    }
+
+    case "inventory": {
+      const user = await db.select().from(users).where(eq(users.discordId, discordId)).then(r => r[0]);
+      if (!user) return msg.reply("You are not registered.");
+
+      const owned = await db.select({
+        itemName: items.name,
+        quantity: userItems.quantity
+      })
+        .from(userItems)
+        .where(eq(userItems.userId, user.id))
+        .leftJoin(items, eq(userItems.itemId, items.id));
+
+      if (owned.length === 0) return msg.reply("Your inventory is empty.");
+
+      const list = owned.map(i => `🎒 ${i.itemName} x${i.quantity}`).join("\n");
+      msg.reply(`**Your Inventory:**\n${list}`);
+      break;
+    }
+
+    default:
+      msg.reply("Unknown command.");
   }
-  else if (command === 'shop') {
-    const allItems = await db.select().from(items);
-
-    if (allItems.length === 0) return msg.reply('No items available in the shop.');
-
-    const shopList = allItems.map(i => `🛒 **${i.name}** - 💰 ${i.price}`).join('\n');
-    msg.reply(`**Marketplace Items:**\n${shopList}`);
-  }
-
-  else if (command === 'inventory') {
-    const user = await db.select().from(users).where(eq(users.discordId, discordId)).then(r => r[0]);
-    if (!user) return msg.reply('You are not registered.');
-
-    const owned = await db.select({
-      itemName: items.name,
-      quantity: userItems.quantity
-    })
-      .from(userItems)
-      .where(eq(userItems.userId, user.id))
-      .leftJoin(items, eq(userItems.itemId, items.id));
-
-    if (owned.length === 0) return msg.reply('Your inventory is empty.');
-
-    const list = owned.map(i => `🎒 ${i.itemName} x${i.quantity}`).join('\n');
-    msg.reply(`**Your Inventory:**\n${list}`);
-  }
-
-
-  // You can add `!sell`, `!inventory`, `!shop` similarly
 });
 
 
